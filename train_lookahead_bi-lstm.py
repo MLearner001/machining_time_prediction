@@ -135,27 +135,31 @@ def train_machining_intelligence():
     # Membaca dimensi fitur murni dari contoh fit
     num_features = scaler.n_features_in_
 
-    print(f"[+] Menyusun Arsitektur Ekspansif Industri (128 Neuron Hibrida, {num_features} Fitur)...")
-    model = models.Sequential([
-        layers.Input(shape=(TOTAL_SEQ_LEN, num_features)),
+    model_path = "bi_lstm_lookahead_model.h5"
+    if os.path.exists(model_path):
+        print(f"[+] Memuat model lama dari {model_path} untuk melanjutkan training...")
+        model = models.load_model(model_path, custom_objects={'mse': tf.keras.losses.MeanSquaredError()})
+    else:
+        print(f"[+] Menyusun Arsitektur Ekspansif Industri (128 Neuron Hibrida, {num_features} Fitur)...")
+        model = models.Sequential([
+            layers.Input(shape=(TOTAL_SEQ_LEN, num_features)),
 
-        layers.Conv1D(filters=128, kernel_size=5, activation='relu', padding='same'),
-        layers.MaxPooling1D(pool_size=2),
-        layers.Dropout(0.3),
+            layers.Conv1D(filters=128, kernel_size=5, activation='relu', padding='same'),
+            layers.MaxPooling1D(pool_size=2),
+            layers.Dropout(0.3),
 
-        layers.Bidirectional(layers.LSTM(128, return_sequences=True)),
-        layers.Dropout(0.3),
+            layers.Bidirectional(layers.LSTM(128, return_sequences=True)),
+            layers.Dropout(0.3),
 
-        layers.Bidirectional(layers.LSTM(128, return_sequences=False)),
-        layers.Dropout(0.4),
+            layers.Bidirectional(layers.LSTM(128, return_sequences=False)),
+            layers.Dropout(0.4),
 
-        layers.Dense(128, activation='relu'),
-        layers.Dense(64, activation='relu'),
-        # Harus dipaksa kembali ke float32 pada layer output agar komputasi loss stabil (kewajiban mixed precision)
-        layers.Dense(1, activation='linear', dtype='float32')
-    ])
-
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+            layers.Dense(128, activation='relu'),
+            layers.Dense(64, activation='relu'),
+            # Harus dipaksa kembali ke float32 pada layer output agar komputasi loss stabil (kewajiban mixed precision)
+            layers.Dense(1, activation='linear', dtype='float32')
+        ])
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
     model.summary()
 
     early_stop = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
