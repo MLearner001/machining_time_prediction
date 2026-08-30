@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 import os
 import gc
+import joblib
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, mixed_precision
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
@@ -118,6 +119,11 @@ def train_machining_intelligence():
 
     y_scaler = StandardScaler()
     y_scaler.fit(y_sample)
+
+    # Simpan scaler agar bisa digunakan saat prediksi
+    print("[+] Menyimpan parameter scaler ke disk...")
+    joblib.dump(x_scaler, 'x_scaler.pkl')
+    joblib.dump(y_scaler, 'y_scaler.pkl')
 
     # Hancurkan contoh master sampel agar RAM kembali ke kondisi 0
     del sample_dfs, df_sample_master, X_sample, y_sample
