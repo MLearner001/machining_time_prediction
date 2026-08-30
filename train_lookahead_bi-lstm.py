@@ -162,7 +162,7 @@ def train_machining_intelligence():
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
     model.summary()
 
-    early_stop = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
     print(f"\n[+] Memulai Eksekusi Latihan Hemat RAM di GPU (Batch Size = {BATCH_SIZE})...")
     history = model.fit(
