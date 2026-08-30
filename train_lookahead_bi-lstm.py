@@ -4,16 +4,19 @@ import tensorflow as tf
 import os
 import gc
 import matplotlib.pyplot as plt
-from tensorflow.keras import layers, models
+from tensorflow.keras import layers, models, mixed_precision
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import StandardScaler
+
+# Aktifkan Mixed Precision (FP16) untuk melipatgandakan kecepatan di GPU RTX 3080 Ti (Tensor Cores)
+mixed_precision.set_global_policy('mixed_float16')
 
 LOOK_BACK = 50
 LOOK_AHEAD = 50
 TOTAL_SEQ_LEN = 101  # 50 lalu + 1 skrg + 50 depan
 
 
-def make_dataset_pipeline(dataset_dir, scaler, batch_size=512, is_training=True):
+def make_dataset_pipeline(dataset_dir, scaler, batch_size=1024, is_training=True):
     """
     Kran Generator Pintar: Membaca file satu per satu dari SSD secara bergantian.
     RAM komputer Anda dijamin sangat dingin (< 3GB terpakai).
@@ -111,7 +114,7 @@ def train_machining_intelligence():
     del sample_dfs, df_sample_master, X_sample
     gc.collect()
 
-    BATCH_SIZE = 512
+    BATCH_SIZE = 1024
 
     # Bagi file secara identik dengan yang ada di pipeline generator
     split_idx = int(len(csv_files) * 0.8)
@@ -148,7 +151,8 @@ def train_machining_intelligence():
 
         layers.Dense(128, activation='relu'),
         layers.Dense(64, activation='relu'),
-        layers.Dense(1, activation='linear')
+        # Harus dipaksa kembali ke float32 pada layer output agar komputasi loss stabil (kewajiban mixed precision)
+        layers.Dense(1, activation='linear', dtype='float32')
     ])
 
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
