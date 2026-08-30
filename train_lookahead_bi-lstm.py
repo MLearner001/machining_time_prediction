@@ -5,7 +5,7 @@ import os
 import gc
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, mixed_precision
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from sklearn.preprocessing import StandardScaler
 
 # Aktifkan Mixed Precision (FP16) untuk melipatgandakan kecepatan di GPU RTX 3080 Ti (Tensor Cores)
@@ -144,7 +144,7 @@ def train_machining_intelligence():
     # Membaca dimensi fitur murni dari contoh fit
     num_features = x_scaler.n_features_in_
 
-    model_path = "bi_lstm_lookahead_model.h5"
+    model_path = "bi_lstm_lookahead_model.keras"
     if os.path.exists(model_path):
         print(f"[+] Memuat model lama dari {model_path} untuk melanjutkan training...")
         model = models.load_model(model_path, custom_objects={'mse': tf.keras.losses.MeanSquaredError()})
@@ -174,6 +174,8 @@ def train_machining_intelligence():
     early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
     # Kurangi learning rate secara otomatis jika validasi loss stagnan
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
+    # Simpan model secara otomatis setiap epoch (menggantikan yang lama jika val_loss lebih baik)
+    checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', save_best_only=True, verbose=1)
 
     print(f"\n[+] Memulai Eksekusi Latihan Hemat RAM di GPU (Batch Size = {BATCH_SIZE})...")
     history = model.fit(
@@ -182,11 +184,12 @@ def train_machining_intelligence():
         validation_data=val_dataset,
         validation_steps=validation_steps,
         epochs=50,
-        callbacks=[early_stop, reduce_lr],
+        callbacks=[early_stop, reduce_lr, checkpoint],
         verbose=1
     )
 
-    model.save("bi_lstm_lookahead_model.h5")
+    # Model save dilakukan otomatis oleh checkpoint, baris ini hanya backup final
+    model.save(model_path)
     print("[✔] Otak Jaringan Digital Twin Sukses Disimpan!")
 
     # Pembuatan grafik evaluasi
