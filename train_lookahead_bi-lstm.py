@@ -8,9 +8,9 @@ from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import StandardScaler
 
-LOOK_BACK = 200
-LOOK_AHEAD = 200
-TOTAL_SEQ_LEN = 401  # 200 lalu + 1 skrg + 200 depan
+LOOK_BACK = 50
+LOOK_AHEAD = 50
+TOTAL_SEQ_LEN = 101  # 50 lalu + 1 skrg + 50 depan
 
 
 def make_dataset_pipeline(dataset_dir, scaler, batch_size=512, is_training=True):
@@ -81,7 +81,7 @@ def train_machining_intelligence():
         except RuntimeError as e:
             print(e)
 
-    dataset_dir = "./final_dataset_batch"
+    dataset_dir = "./split_dataset_small"
     csv_files = [os.path.join(dataset_dir, f) for f in os.listdir(dataset_dir) if f.endswith('.csv')]
 
     print("[+] Mengalkulasikan Parameter Skala Global secara Ringan...")
@@ -108,7 +108,7 @@ def train_machining_intelligence():
 
     print(f"[+] Menyusun Arsitektur Ekspansif Industri (128 Neuron Hibrida, {num_features} Fitur)...")
     model = models.Sequential([
-        layers.Masking(mask_value=0.0, input_shape=(TOTAL_SEQ_LEN, num_features)),
+        layers.Input(shape=(TOTAL_SEQ_LEN, num_features)),
 
         layers.Conv1D(filters=128, kernel_size=5, activation='relu', padding='same'),
         layers.MaxPooling1D(pool_size=2),
