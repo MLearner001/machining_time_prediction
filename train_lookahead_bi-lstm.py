@@ -5,7 +5,7 @@ import os
 import gc
 import matplotlib.pyplot as plt
 from tensorflow.keras import layers, models, mixed_precision
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.preprocessing import StandardScaler
 
 # Aktifkan Mixed Precision (FP16) untuk melipatgandakan kecepatan di GPU RTX 3080 Ti (Tensor Cores)
@@ -16,7 +16,7 @@ LOOK_AHEAD = 50
 TOTAL_SEQ_LEN = 101  # 50 lalu + 1 skrg + 50 depan
 
 
-def make_dataset_pipeline(dataset_dir, scaler, batch_size=1024, is_training=True):
+def make_dataset_pipeline(dataset_dir, x_scaler, y_scaler, batch_size=1024, is_training=True):
     """
     Kran Generator Pintar: Membaca file satu per satu dari SSD secara bergantian.
     RAM komputer Anda dijamin sangat dingin (< 3GB terpakai).
@@ -28,15 +28,20 @@ def make_dataset_pipeline(dataset_dir, scaler, batch_size=1024, is_training=True
     target_files = csv_files[:split_idx] if is_training else csv_files[split_idx:]
 
     def file_stream_generator():
+        # Kocok urutan file setiap kali generator dipanggil (awal setiap epoch)
+        # agar model tidak terjebak "catastrophic forgetting" pada file awal
+        np.random.shuffle(target_files)
+
         for file_path in target_files:
             # Memuat hanya SATU file ke RAM secara instan
             df = pd.read_csv(file_path)
 
             X_raw = df.drop(columns=['Time(s)', 'Actual_Feedrate'])
-            y_raw = df['Actual_Feedrate'].values.astype(np.float32)
+            # Skalakan target feedrate
+            y_raw = y_scaler.transform(df[['Actual_Feedrate']]).flatten().astype(np.float32)
 
             # Transformasikan skala data ke float32 hemat memori
-            X_scaled = scaler.transform(X_raw).astype(np.float32)
+            X_scaled = x_scaler.transform(X_raw).astype(np.float32)
 
             total_rows = len(X_scaled)
             num_features = X_scaled.shape[1]
@@ -106,12 +111,16 @@ def train_machining_intelligence():
     sample_dfs = [pd.read_csv(f) for f in csv_files[:3]]
     df_sample_master = pd.concat(sample_dfs, ignore_index=True)
     X_sample = df_sample_master.drop(columns=['Time(s)', 'Actual_Feedrate'])
+    y_sample = df_sample_master[['Actual_Feedrate']]
 
-    scaler = StandardScaler()
-    scaler.fit(X_sample)
+    x_scaler = StandardScaler()
+    x_scaler.fit(X_sample)
+
+    y_scaler = StandardScaler()
+    y_scaler.fit(y_sample)
 
     # Hancurkan contoh master sampel agar RAM kembali ke kondisi 0
-    del sample_dfs, df_sample_master, X_sample
+    del sample_dfs, df_sample_master, X_sample, y_sample
     gc.collect()
 
     BATCH_SIZE = 1024
@@ -129,11 +138,11 @@ def train_machining_intelligence():
     print(f"    [✔] Training Steps: {steps_per_epoch} | Validation Steps: {validation_steps}")
 
     print("[+] Merakit Kran Aliran Pipa File Streaming (Anti-RAM Ballooning)...")
-    train_dataset = make_dataset_pipeline(dataset_dir, scaler, batch_size=BATCH_SIZE, is_training=True)
-    val_dataset = make_dataset_pipeline(dataset_dir, scaler, batch_size=BATCH_SIZE, is_training=False)
+    train_dataset = make_dataset_pipeline(dataset_dir, x_scaler, y_scaler, batch_size=BATCH_SIZE, is_training=True)
+    val_dataset = make_dataset_pipeline(dataset_dir, x_scaler, y_scaler, batch_size=BATCH_SIZE, is_training=False)
 
     # Membaca dimensi fitur murni dari contoh fit
-    num_features = scaler.n_features_in_
+    num_features = x_scaler.n_features_in_
 
     model_path = "bi_lstm_lookahead_model.h5"
     if os.path.exists(model_path):
@@ -163,6 +172,8 @@ def train_machining_intelligence():
     model.summary()
 
     early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    # Kurangi learning rate secara otomatis jika validasi loss stagnan
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
 
     print(f"\n[+] Memulai Eksekusi Latihan Hemat RAM di GPU (Batch Size = {BATCH_SIZE})...")
     history = model.fit(
@@ -171,7 +182,7 @@ def train_machining_intelligence():
         validation_data=val_dataset,
         validation_steps=validation_steps,
         epochs=50,
-        callbacks=[early_stop],
+        callbacks=[early_stop, reduce_lr],
         verbose=1
     )
 
