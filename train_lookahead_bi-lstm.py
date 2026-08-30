@@ -4,16 +4,19 @@ import tensorflow as tf
 import os
 import gc
 import matplotlib.pyplot as plt
-from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras import layers, models, mixed_precision
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.preprocessing import StandardScaler
 
-LOOK_BACK = 200
-LOOK_AHEAD = 200
-TOTAL_SEQ_LEN = 401  # 200 lalu + 1 skrg + 200 depan
+# Aktifkan Mixed Precision (FP16) untuk melipatgandakan kecepatan di GPU RTX 3080 Ti (Tensor Cores)
+mixed_precision.set_global_policy('mixed_float16')
+
+LOOK_BACK = 50
+LOOK_AHEAD = 50
+TOTAL_SEQ_LEN = 101  # 50 lalu + 1 skrg + 50 depan
 
 
-def make_dataset_pipeline(dataset_dir, scaler, batch_size=512, is_training=True):
+def make_dataset_pipeline(dataset_dir, x_scaler, y_scaler, batch_size=1024, is_training=True):
     """
     Kran Generator Pintar: Membaca file satu per satu dari SSD secara bergantian.
     RAM komputer Anda dijamin sangat dingin (< 3GB terpakai).
@@ -25,15 +28,20 @@ def make_dataset_pipeline(dataset_dir, scaler, batch_size=512, is_training=True)
     target_files = csv_files[:split_idx] if is_training else csv_files[split_idx:]
 
     def file_stream_generator():
+        # Kocok urutan file setiap kali generator dipanggil (awal setiap epoch)
+        # agar model tidak terjebak "catastrophic forgetting" pada file awal
+        np.random.shuffle(target_files)
+
         for file_path in target_files:
             # Memuat hanya SATU file ke RAM secara instan
             df = pd.read_csv(file_path)
 
             X_raw = df.drop(columns=['Time(s)', 'Actual_Feedrate'])
-            y_raw = df['Actual_Feedrate'].values.astype(np.float32)
+            # Skalakan target feedrate
+            y_raw = y_scaler.transform(df[['Actual_Feedrate']]).flatten().astype(np.float32)
 
             # Transformasikan skala data ke float32 hemat memori
-            X_scaled = scaler.transform(X_raw).astype(np.float32)
+            X_scaled = x_scaler.transform(X_raw).astype(np.float32)
 
             total_rows = len(X_scaled)
             num_features = X_scaled.shape[1]
@@ -67,8 +75,21 @@ def make_dataset_pipeline(dataset_dir, scaler, batch_size=512, is_training=True)
 
     dataset = tf.data.Dataset.from_generator(file_stream_generator, output_signature=output_signature)
 
+    # Ulangi dataset secara tak terbatas agar epoch generator tidak terputus
+    dataset = dataset.repeat()
+
     # Aktifkan prefetching batch dinamis khusus sirkuit CUDA RTX 3080 Ti
     return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+
+def count_total_rows(csv_files):
+    """Menghitung total baris secara cepat tanpa memuat seluruh file ke RAM"""
+    total = 0
+    for file_path in csv_files:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # -1 untuk mengurangi header
+            total += sum(1 for _ in f) - 1
+    return total
 
 
 def train_machining_intelligence():
@@ -81,7 +102,7 @@ def train_machining_intelligence():
         except RuntimeError as e:
             print(e)
 
-    dataset_dir = "./final_dataset_batch"
+    dataset_dir = "./split_dataset_small"
     csv_files = [os.path.join(dataset_dir, f) for f in os.listdir(dataset_dir) if f.endswith('.csv')]
 
     print("[+] Mengalkulasikan Parameter Skala Global secara Ringan...")
@@ -90,52 +111,78 @@ def train_machining_intelligence():
     sample_dfs = [pd.read_csv(f) for f in csv_files[:3]]
     df_sample_master = pd.concat(sample_dfs, ignore_index=True)
     X_sample = df_sample_master.drop(columns=['Time(s)', 'Actual_Feedrate'])
+    y_sample = df_sample_master[['Actual_Feedrate']]
 
-    scaler = StandardScaler()
-    scaler.fit(X_sample)
+    x_scaler = StandardScaler()
+    x_scaler.fit(X_sample)
+
+    y_scaler = StandardScaler()
+    y_scaler.fit(y_sample)
 
     # Hancurkan contoh master sampel agar RAM kembali ke kondisi 0
-    del sample_dfs, df_sample_master, X_sample
+    del sample_dfs, df_sample_master, X_sample, y_sample
     gc.collect()
 
-    BATCH_SIZE = 512
+    BATCH_SIZE = 1024
+
+    # Bagi file secara identik dengan yang ada di pipeline generator
+    split_idx = int(len(csv_files) * 0.8)
+    train_files = csv_files[:split_idx]
+    val_files = csv_files[split_idx:]
+
+    print("[+] Menghitung total steps per epoch...")
+    total_train_rows = count_total_rows(train_files)
+    total_val_rows = count_total_rows(val_files)
+    steps_per_epoch = total_train_rows // BATCH_SIZE
+    validation_steps = total_val_rows // BATCH_SIZE
+    print(f"    [✔] Training Steps: {steps_per_epoch} | Validation Steps: {validation_steps}")
+
     print("[+] Merakit Kran Aliran Pipa File Streaming (Anti-RAM Ballooning)...")
-    train_dataset = make_dataset_pipeline(dataset_dir, scaler, batch_size=BATCH_SIZE, is_training=True)
-    val_dataset = make_dataset_pipeline(dataset_dir, scaler, batch_size=BATCH_SIZE, is_training=False)
+    train_dataset = make_dataset_pipeline(dataset_dir, x_scaler, y_scaler, batch_size=BATCH_SIZE, is_training=True)
+    val_dataset = make_dataset_pipeline(dataset_dir, x_scaler, y_scaler, batch_size=BATCH_SIZE, is_training=False)
 
     # Membaca dimensi fitur murni dari contoh fit
-    num_features = scaler.n_features_in_
+    num_features = x_scaler.n_features_in_
 
-    print(f"[+] Menyusun Arsitektur Ekspansif Industri (128 Neuron Hibrida, {num_features} Fitur)...")
-    model = models.Sequential([
-        layers.Masking(mask_value=0.0, input_shape=(TOTAL_SEQ_LEN, num_features)),
+    model_path = "bi_lstm_lookahead_model.h5"
+    if os.path.exists(model_path):
+        print(f"[+] Memuat model lama dari {model_path} untuk melanjutkan training...")
+        model = models.load_model(model_path, custom_objects={'mse': tf.keras.losses.MeanSquaredError()})
+    else:
+        print(f"[+] Menyusun Arsitektur Ekspansif Industri (128 Neuron Hibrida, {num_features} Fitur)...")
+        model = models.Sequential([
+            layers.Input(shape=(TOTAL_SEQ_LEN, num_features)),
 
-        layers.Conv1D(filters=128, kernel_size=5, activation='relu', padding='same'),
-        layers.MaxPooling1D(pool_size=2),
-        layers.Dropout(0.3),
+            layers.Conv1D(filters=128, kernel_size=5, activation='relu', padding='same'),
+            layers.MaxPooling1D(pool_size=2),
+            layers.Dropout(0.3),
 
-        layers.Bidirectional(layers.LSTM(128, return_sequences=True)),
-        layers.Dropout(0.3),
+            layers.Bidirectional(layers.LSTM(128, return_sequences=True)),
+            layers.Dropout(0.3),
 
-        layers.Bidirectional(layers.LSTM(128, return_sequences=False)),
-        layers.Dropout(0.4),
+            layers.Bidirectional(layers.LSTM(128, return_sequences=False)),
+            layers.Dropout(0.4),
 
-        layers.Dense(128, activation='relu'),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(1, activation='linear')
-    ])
-
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+            layers.Dense(128, activation='relu'),
+            layers.Dense(64, activation='relu'),
+            # Harus dipaksa kembali ke float32 pada layer output agar komputasi loss stabil (kewajiban mixed precision)
+            layers.Dense(1, activation='linear', dtype='float32')
+        ])
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
     model.summary()
 
-    early_stop = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+    early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    # Kurangi learning rate secara otomatis jika validasi loss stagnan
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
 
     print(f"\n[+] Memulai Eksekusi Latihan Hemat RAM di GPU (Batch Size = {BATCH_SIZE})...")
     history = model.fit(
         train_dataset,
+        steps_per_epoch=steps_per_epoch,
         validation_data=val_dataset,
+        validation_steps=validation_steps,
         epochs=50,
-        callbacks=[early_stop],
+        callbacks=[early_stop, reduce_lr],
         verbose=1
     )
 
