@@ -67,8 +67,21 @@ def make_dataset_pipeline(dataset_dir, scaler, batch_size=512, is_training=True)
 
     dataset = tf.data.Dataset.from_generator(file_stream_generator, output_signature=output_signature)
 
+    # Ulangi dataset secara tak terbatas agar epoch generator tidak terputus
+    dataset = dataset.repeat()
+
     # Aktifkan prefetching batch dinamis khusus sirkuit CUDA RTX 3080 Ti
     return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+
+def count_total_rows(csv_files):
+    """Menghitung total baris secara cepat tanpa memuat seluruh file ke RAM"""
+    total = 0
+    for file_path in csv_files:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # -1 untuk mengurangi header
+            total += sum(1 for _ in f) - 1
+    return total
 
 
 def train_machining_intelligence():
@@ -99,6 +112,19 @@ def train_machining_intelligence():
     gc.collect()
 
     BATCH_SIZE = 512
+
+    # Bagi file secara identik dengan yang ada di pipeline generator
+    split_idx = int(len(csv_files) * 0.8)
+    train_files = csv_files[:split_idx]
+    val_files = csv_files[split_idx:]
+
+    print("[+] Menghitung total steps per epoch...")
+    total_train_rows = count_total_rows(train_files)
+    total_val_rows = count_total_rows(val_files)
+    steps_per_epoch = total_train_rows // BATCH_SIZE
+    validation_steps = total_val_rows // BATCH_SIZE
+    print(f"    [✔] Training Steps: {steps_per_epoch} | Validation Steps: {validation_steps}")
+
     print("[+] Merakit Kran Aliran Pipa File Streaming (Anti-RAM Ballooning)...")
     train_dataset = make_dataset_pipeline(dataset_dir, scaler, batch_size=BATCH_SIZE, is_training=True)
     val_dataset = make_dataset_pipeline(dataset_dir, scaler, batch_size=BATCH_SIZE, is_training=False)
@@ -133,7 +159,9 @@ def train_machining_intelligence():
     print(f"\n[+] Memulai Eksekusi Latihan Hemat RAM di GPU (Batch Size = {BATCH_SIZE})...")
     history = model.fit(
         train_dataset,
+        steps_per_epoch=steps_per_epoch,
         validation_data=val_dataset,
+        validation_steps=validation_steps,
         epochs=50,
         callbacks=[early_stop],
         verbose=1
