@@ -48,17 +48,22 @@ def predict_machining_time(test_file_path, model_path="bi_lstm_lookahead_model.k
     future_padding = np.zeros((LOOK_AHEAD, num_features), dtype=np.float32)
     X_padded = np.vstack((past_padding, X_scaled, future_padding))
 
-    # Construct the sequential 3D array for the LSTM (Total rows, 101, features)
     total_rows = len(X_scaled)
-    X_sequences = np.zeros((total_rows, LOOK_BACK + 1 + LOOK_AHEAD, num_features), dtype=np.float32)
-
-    for i in range(total_rows):
-        center = i + LOOK_BACK
-        X_sequences[i] = X_padded[center - LOOK_BACK : center + LOOK_AHEAD + 1]
 
     print("[+] Melakukan Prediksi Digital Twin menggunakan GPU...")
+    # Predict using Generator to strictly prevent RAM OOM ballooning on huge files
+    def data_generator():
+        for i in range(len(X_scaled)):
+            center = i + LOOK_BACK
+            yield X_padded[center - LOOK_BACK : center + LOOK_AHEAD + 1]
+
+    dataset = tf.data.Dataset.from_generator(
+        data_generator,
+        output_signature=tf.TensorSpec(shape=(LOOK_BACK + 1 + LOOK_AHEAD, num_features), dtype=tf.float32)
+    ).batch(1024).prefetch(tf.data.AUTOTUNE)
+
     # Predict scaled feedrates
-    predicted_scaled = model.predict(X_sequences, batch_size=1024)
+    predicted_scaled = model.predict(dataset, verbose=1)
 
     # Reverse the scaling to get real mm/min values!
     predicted_feedrate = y_scaler.inverse_transform(predicted_scaled).flatten()
